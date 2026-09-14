@@ -65,6 +65,18 @@
     margin:10px 0 4px;font-weight:600}
   .hint{font-size:12px;color:var(--dim);text-align:center;margin-bottom:4px}
   input[type=file]{display:none}
+  .row{cursor:pointer}
+  .row:active{background:#262b3d}
+  .row .more{font-size:11px;color:var(--accent);margin-top:6px}
+  .pname{font-size:19px;font-weight:700}
+  .pco{color:var(--dim);font-size:13px;margin-bottom:4px}
+  #dlgPerson{max-height:82vh;overflow-y:auto}
+  .sect{margin-top:15px}
+  .sect h3{font-size:11px;text-transform:uppercase;letter-spacing:.9px;
+    color:var(--dim);margin:0 0 5px;font-weight:600}
+  .sect .body{font-size:14px;line-height:1.5;white-space:pre-wrap;color:#dfe4ee}
+  .sect .body b{color:#fff}
+  .drow button.danger{background:#3b1d24;border-color:#7f2d3b;color:#ffb4be;flex:0 0 38%}
 </style>
 </head>
 <body>
@@ -113,6 +125,16 @@
   <div class="drow">
     <button id="dlgCancel">Cancel</button>
     <button class="go" id="dlgSave">Save</button>
+  </div>
+</dialog>
+
+<dialog id="dlgPerson">
+  <div class="pname" id="pName"></div>
+  <div class="pco" id="pCo"></div>
+  <div id="pBody"></div>
+  <div class="drow">
+    <button id="pDelete" class="danger">Delete</button>
+    <button class="go" id="pClose">Close</button>
   </div>
 </dialog>
 
@@ -318,10 +340,11 @@ $("fileBadge").onchange = function(e){
     return send("/pmi-badge" + q(), JSON.stringify({ image:b64 }),
                 { "Content-Type":"application/json" });
   }).then(function(r){
-    status("Got <b>" + (r.name || "badge") + "</b>" +
-           (r.company ? " &middot; " + r.company : "") +
-           "<br><span style='color:var(--dim);font-size:13px'>Now add a voice debrief or a note.</span>", "ok");
-    refresh();
+    status("Got <b>" + esc(r.name || "badge") + "</b>" +
+           (r.company ? " · " + esc(r.company) : ""), "ok");
+    return refresh().then(function(){
+      if (rows.length) { openPerson(rows[rows.length - 1].row); }
+    });
   }).catch(failed);
 };
 
@@ -479,16 +502,87 @@ function render(){
   }
   host.innerHTML = rows.slice().reverse().map(function(r){
     var extra = r.extracted || r.note || "";
-    return '<div class="row">' +
+    return '<div class="row" data-row="' + r.row + '">' +
       '<div class="nm">' + esc(r.name || "Unnamed") + '</div>' +
-      '<div class="co">' + esc([r.title, r.company].filter(Boolean).join(" &middot; ")) + '</div>' +
-      (extra ? '<div class="ex">' + esc(extra).slice(0, 260) + '</div>' : "") +
+      '<div class="co">' + esc([r.title, r.company].filter(Boolean).join(" · ")) + '</div>' +
+      (extra ? '<div class="ex">' + esc(extra).slice(0, 200) + '</div>' : "") +
       '<div class="tm">' + esc(r.time || "") + '</div>' +
+      (r.card ? '<div class="more">Tap for talking points</div>' : "") +
     '</div>';
   }).join("");
 }
+
+/* ---------- person detail: talking points, and delete ---------- */
+var openRow = null;
+
+/* The badge brief comes back as **bold** run-on markdown. Split it into its
+   labelled sections so it can be skimmed while someone is standing there. */
+function sections(card){
+  var parts = String(card).split(/\*\*(.+?)\*\*/g);
+  var out = "", lead = (parts.shift() || "").trim();
+  if (lead) { out += '<div class="sect"><div class="body">' + esc(lead) + '</div></div>'; }
+  for (var i = 0; i + 1 < parts.length; i += 2) {
+    out += '<div class="sect"><h3>' + esc(parts[i]) + '</h3>' +
+           '<div class="body">' + esc((parts[i + 1] || "").trim()) + '</div></div>';
+  }
+  return out || '<div class="sect"><div class="body">' + esc(card) + '</div></div>';
+}
+
+function openPerson(rowNum){
+  var r = null;
+  for (var i = 0; i < rows.length; i++) { if (rows[i].row === rowNum) { r = rows[i]; } }
+  if (!r) return;
+  openRow = r.row;
+
+  $("pName").textContent = r.name || "Unnamed";
+  $("pCo").textContent = [r.title, r.company].filter(Boolean).join(" · ");
+
+  var html = "";
+  if (r.card) { html += sections(r.card); }
+  if (r.extracted) {
+    html += '<div class="sect"><h3>From your debrief</h3><div class="body">' +
+            esc(r.extracted) + '</div></div>';
+  }
+  if (r.note) {
+    html += '<div class="sect"><h3>Your note</h3><div class="body">' +
+            esc(r.note) + '</div></div>';
+  }
+  if (r.transcript) {
+    html += '<div class="sect"><h3>Transcript</h3><div class="body">' +
+            esc(r.transcript) + '…</div></div>';
+  }
+  if (!html) {
+    html = '<div class="sect"><div class="body">Nothing captured for this ' +
+           'person yet. Add a voice debrief or a note.</div></div>';
+  }
+  $("pBody").innerHTML = html;
+  $("dlgPerson").showModal();
+  $("dlgPerson").scrollTop = 0;
+}
+
+$("list").addEventListener("click", function(e){
+  var el = e.target.closest ? e.target.closest(".row[data-row]") : null;
+  if (el) { openPerson(parseInt(el.getAttribute("data-row"), 10)); }
+});
+$("pClose").onclick = function(){ $("dlgPerson").close(); };
+
+$("pDelete").onclick = function(){
+  if (openRow === null) return;
+  var name = $("pName").textContent;
+  if (!confirm("Delete " + name + "? This removes the row and bins the photo " +
+               "and recording.")) { return; }
+  var target = openRow;
+  $("dlgPerson").close();
+  busy("Deleting&hellip;");
+  /* Deletes are never queued offline: row numbers shift as rows go, so a
+     stale queued delete could remove the wrong person later. */
+  send("/pmi-delete" + q({ row: target }), JSON.stringify({ row: target }),
+       { "Content-Type": "application/json" }, true)
+    .then(function(){ status("Deleted " + esc(name) + ".", "ok"); refresh(); })
+    .catch(function(){ status("Could not delete, you need a connection.", "err"); });
+};
 function refresh(){
-  fetch(API + "/pmi-list" + q().replace("?", "?"), { method:"GET" })
+  return fetch(API + "/pmi-list" + q(), { method:"GET" })
     .then(function(r){ return r.json(); })
     .then(function(d){ rows = (d && d.rows) || []; render(); })
     .catch(function(){});
