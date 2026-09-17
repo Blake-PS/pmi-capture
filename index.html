@@ -245,16 +245,25 @@ function showPending(){
     var el = $("pending");
     if (!items.length) { el.className = "pending"; return; }
     el.className = "pending show";
+    var mb = 0;
+    items.forEach(function(it){ mb += (it.body && it.body.length || 0) / 1048576; });
     $("pendingTxt").textContent = items.length + " capture" +
-      (items.length > 1 ? "s" : "") + " waiting for signal";
+      (items.length > 1 ? "s" : "") + " waiting to send" +
+      (mb >= 1 ? " (" + mb.toFixed(1) + "MB)" : "");
   });
 }
-$("retry").onclick = function(){ drain(true); };
+$("retry").onclick = function(){
+  /* A big queued recording can sit on the wire for minutes. Without this the
+     button looks dead and gets tapped again mid-upload. */
+  busy("Sending&hellip; a long recording can take a couple of minutes.");
+  drain(true);
+};
 
-var draining = false;
+var draining = false, lastErr = null;
 function drain(loud){
   if (draining || !db) return;
   draining = true;
+  lastErr = null;
   qAll().then(function(items){
     var chain = Promise.resolve(), sent = 0;
     items.forEach(function(it){
@@ -262,7 +271,13 @@ function drain(loud){
         return send(it.path, it.body, it.headers, true).then(function(){
           sent++;
           return qDel(it.id);
-        }).catch(function(){});
+        }).catch(function(e){
+          /* An abort reads as a bare "AbortError" with no hint of why, which is
+             what made this look like a signal problem rather than a slow upload. */
+          lastErr = (e && e.name === "AbortError")
+            ? "upload timed out"
+            : (e && e.message) || "unknown";
+        });
       });
     });
     return chain.then(function(){
@@ -272,7 +287,10 @@ function drain(loud){
         if (loud) status(sent + " queued capture" + (sent>1?"s":"") + " sent.", "ok");
         refresh();
       } else if (loud) {
-        status("Still no connection.", "err");
+        status(lastErr
+          ? "Could not send: " + esc(lastErr) + ". Keep this page open, a long " +
+            "recording can take a couple of minutes to go up."
+          : "Still no connection.", "err");
       }
     });
   });
@@ -296,9 +314,18 @@ function toB64(blob){
     fr.readAsDataURL(blob);
   });
 }
+/* A flat timeout is what stranded a 15 minute debrief at the summit: the
+   payload was ~10MB of base64 and the upload alone needed well over a minute
+   on booth wi-fi, so every attempt aborted at 45s and the retry did exactly
+   the same thing forever. Budget by payload size instead, and allow for
+   Whisper plus the extract on the far side of the upload. */
+function budget(body){
+  var mb = (body && body.length ? body.length : 0) / 1048576;
+  return Math.min(600000, Math.max(45000, 60000 + mb * 45000));
+}
 function send(path, body, headers, noQueue){
   var ctl = new AbortController();
-  var t = setTimeout(function(){ ctl.abort(); }, 45000);
+  var t = setTimeout(function(){ ctl.abort(); }, budget(body));
   return fetch(API + path, {
     method:"POST", body:body, headers:headers || {}, signal:ctl.signal
   }).then(function(r){
@@ -383,6 +410,10 @@ function startRec(mode){
       }
       return false;
     });
+    /* Speech at 32kbps mono is still clean for Whisper and turns a 15 minute
+       debrief into ~3.5MB instead of ~15MB. The default bitrate is what made
+       long recordings unsendable from the floor. */
+    opts.audioBitsPerSecond = 32000;
     rec = new MediaRecorder(stream, opts);
     chunks = [];
     rec.ondataavailable = function(e){ if (e.data.size) chunks.push(e.data); };
