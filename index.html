@@ -418,7 +418,12 @@ function startRec(mode){
     chunks = [];
     rec.ondataavailable = function(e){ if (e.data.size) chunks.push(e.data); };
     rec.onstop = function(){ stream.getTracks().forEach(function(t){ t.stop(); }); };
-    rec.start();
+    /* Flush every second instead of relying on one blob at stop. iOS Safari
+       can interrupt a capture (screen lock, a call, an audio-session grab) and
+       hand back only a fragment: the Electia Love recording at the summit came
+       out as 4.4s of a real conversation. Timesliced chunks mean everything
+       captured up to the interruption survives. */
+    rec.start(1000);
     recStart = Date.now();
 
     $("recTitle").textContent = mode === "debrief" ? "Voice debrief" : "Recording conversation";
@@ -447,6 +452,17 @@ function endRec(keep){
     var blob = new Blob(chunks, { type:type });
     chunks = [];
     var ext = type.indexOf("mp4") >= 0 ? "m4a" : "webm";
+    /* The timer keeps counting even when the recorder has been cut off, so a
+       recording can look like 15 minutes and hold 4 seconds. Say so before it
+       goes up, while the conversation is still fresh enough to redo. */
+    var wanted = Math.round((Date.now() - recStart) / 1000);
+    var got = Math.round(blob.size / ((mr.audioBitsPerSecond || 32000) / 8));
+    if (wanted > 20 && got < wanted * 0.6) {
+      alert("Heads up: you recorded " + Math.floor(wanted / 60) + "m" +
+            ("0" + (wanted % 60)).slice(-2) + " but only about " + got +
+            "s of audio survived. iOS cut the recording short, usually a screen " +
+            "lock. Sending what there is, add a voice debrief to fill the gaps.");
+    }
     busy("Transcribing&hellip;");
     toB64(blob).then(function(b64){
       return send("/pmi-audio" + q({ mode:recMode, ext:ext }),
