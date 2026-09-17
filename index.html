@@ -343,6 +343,13 @@ function send(path, body, headers, noQueue){
     throw err;
   });
 }
+/* Pin the person this capture is for at the moment it is made. A recording
+   that waits in the offline queue used to be filed against whoever was last in
+   the sheet when it finally uploaded, so a queued debrief could overwrite a
+   later person's row. */
+function lastRow(){
+  return rows.length ? rows[rows.length - 1].row : 0;
+}
 function q(extra){
   var s = "?capturer=" + encodeURIComponent(who);
   for (var k in extra) { s += "&" + k + "=" + encodeURIComponent(extra[k]); }
@@ -502,7 +509,7 @@ function endRec(keep){
     }
     busy("Transcribing&hellip;");
     toB64(blob).then(function(b64){
-      return send("/pmi-audio" + q({ mode:recMode, ext:ext }),
+      return send("/pmi-audio" + q({ mode:recMode, ext:ext, row:lastRow() }),
                   JSON.stringify({ audio:b64, mime:type, ext:ext }),
                   { "Content-Type":"application/json" });
     }).then(function(r){
@@ -565,7 +572,8 @@ $("bNote").onclick = function(){
   ], function(v){
     if (!v.note) return;
     busy("Saving&hellip;");
-    send("/pmi-note" + q(), JSON.stringify(v), { "Content-Type":"application/json" })
+    send("/pmi-note" + q({ row:lastRow() }), JSON.stringify(v),
+         { "Content-Type":"application/json" })
       .then(function(){ status("Note saved.", "ok"); refresh(); })
       .catch(failed);
   });
