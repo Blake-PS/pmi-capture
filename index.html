@@ -395,6 +395,27 @@ function shrink(file){
 
 /* ---------- audio ---------- */
 var rec = null, chunks = [], recTick = null, recMode = "debrief", recStart = 0;
+var wake = null;
+
+/* The Electia Love recording caught the first 4.4s of a three minute
+   conversation and then stopped dead. Nothing in the app stops a recorder, and
+   the timer kept counting, so it looked fine on screen. That is what iOS does
+   when the screen locks mid-capture: it tears down the audio session and the
+   MediaRecorder never fires an error. Hold a wake lock for the length of the
+   recording so the screen cannot lock while someone is talking. */
+function holdWake(){
+  if (!navigator.wakeLock) return;
+  navigator.wakeLock.request("screen").then(function(w){ wake = w; })
+    .catch(function(){});
+}
+function dropWake(){
+  if (wake) { try { wake.release(); } catch (e) {} wake = null; }
+}
+/* iOS drops the lock whenever the tab is backgrounded, and does not give it
+   back on return. Re-take it if a recording is still running. */
+document.addEventListener("visibilitychange", function(){
+  if (!document.hidden && rec) { holdWake(); }
+});
 
 function startRec(mode){
   recMode = mode;
@@ -423,8 +444,16 @@ function startRec(mode){
        hand back only a fragment: the Electia Love recording at the summit came
        out as 4.4s of a real conversation. Timesliced chunks mean everything
        captured up to the interruption survives. */
+    /* If the audio session is torn down anyway, the track mutes or ends. The
+       recorder stays silent about it, so watch the track directly and close the
+       recording out at that point rather than banking a dead timer. */
+    stream.getAudioTracks().forEach(function(tr){
+      tr.addEventListener("mute", cutShort);
+      tr.addEventListener("ended", cutShort);
+    });
     rec.start(1000);
     recStart = Date.now();
+    holdWake();
 
     $("recTitle").textContent = mode === "debrief" ? "Voice debrief" : "Recording conversation";
     $("recHint").textContent = mode === "debrief"
@@ -440,7 +469,15 @@ function startRec(mode){
     status("Microphone blocked. Allow it in Settings, or type a note.", "err");
   });
 }
+/* Save whatever was captured before the interruption instead of losing it. */
+function cutShort(){
+  if (!rec) return;
+  endRec(true);
+  status("The recording was cut off by iOS and has been saved up to that " +
+         "point. Add a voice debrief for the rest.", "err", true);
+}
 function endRec(keep){
+  dropWake();
   clearInterval(recTick);
   $("dlgRec").close();
   if (!rec) return;
