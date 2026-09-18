@@ -156,6 +156,9 @@
     <button class="go" id="pTarget">Capture for them</button>
   </div>
   <div class="drow">
+    <button id="pRename">Set name &amp; company</button>
+  </div>
+  <div class="drow">
     <button id="pClose">Close</button>
   </div>
 </dialog>
@@ -240,6 +243,42 @@ function openDB(){
   });
 }
 function tx(mode){ return db.transaction("q", mode).objectStore("q"); }
+
+/* Captures queued BEFORE the attribution fix carry a row worked out by the old
+   "last row in the sheet" rule. A refresh loads this code but does not correct
+   what is already in the queue, so those would still drain onto whoever the old
+   rule picked, which for anyone who did not debrief immediately after scanning
+   is the wrong person. There is no way to tell from here which of them were
+   right, so drop the row and let them land on their own UNASSIGNED row: a
+   visible row that needs a name costs seconds, a wrong attribution is never
+   noticed at all. Runs once. */
+function migrateQueue(){
+  return new Promise(function(res){
+    if (!db) { return res(); }
+    var done = false;
+    try { done = localStorage.getItem("pmiQueueV2") === "1"; } catch (e) {}
+    if (done) { return res(); }
+    qAll().then(function(items){
+      var store = tx("readwrite"), touched = 0;
+      items.forEach(function(it){
+        if (it.path && /[?&]row=/.test(it.path)) {
+          it.path = it.path.replace(/([?&])row=[^&]*/, "$1row=0");
+          store.put(it);
+          touched++;
+        }
+      });
+      try { localStorage.setItem("pmiQueueV2", "1"); } catch (e) {}
+      if (touched) {
+        status(touched + " capture" + (touched > 1 ? "s were" : " was") +
+               " queued before today's fix. " + (touched > 1 ? "They" : "It") +
+               " will be sent to an UNASSIGNED row rather than risk landing on " +
+               "the wrong person. Name " + (touched > 1 ? "them" : "it") +
+               " from the list once sent.", "err", true);
+      }
+      res();
+    });
+  });
+}
 function qAdd(item){
   return new Promise(function(res){
     if (!db) return res();
@@ -689,6 +728,8 @@ function render(){
     var isT = target && target.row === r.row;
     return '<div class="row' + (isT ? ' is-target' : '') + '" data-row="' + r.row + '">' +
       '<div class="nm">' + esc(r.name || "Unnamed") + '</div>' +
+      (/^UNASSIGNED/.test(r.name || "")
+        ? '<div class="pick" style="color:var(--warn)">Tap to give this a name</div>' : "") +
       '<div class="co">' + esc([r.title, r.company].filter(Boolean).join(" · ")) + '</div>' +
       (extra ? '<div class="ex">' + esc(extra).slice(0, 200) + '</div>' : "") +
       '<div class="tm">' + esc(r.time || "") + '</div>' +
@@ -751,6 +792,38 @@ $("list").addEventListener("click", function(e){
   if (el) { openPerson(parseInt(el.getAttribute("data-row"), 10)); }
 });
 $("pClose").onclick = function(){ $("dlgPerson").close(); };
+/* An UNASSIGNED row is only useful if it can be named without opening the
+   spreadsheet, which nobody is doing on a phone at a booth. */
+$("pRename").onclick = function(){
+  if (openRow === null) { return; }
+  var row = openRow, cur = null;
+  for (var i = 0; i < rows.length; i++) { if (rows[i].row === row) { cur = rows[i]; } }
+  var wasUnassigned = cur && /^UNASSIGNED/.test(cur.name || "");
+  $("dlgPerson").close();
+  askText("Name row " + row, [
+    { key:"name",    label:"Name" },
+    { key:"company", label:"Company or franchise" }
+  ], function(v){
+    if (!v.name && !v.company) { return; }
+    busy("Saving&hellip;");
+    /* Not queued offline: the row number is only meaningful against the sheet
+       as it stands now, and a rename that lands late could name the wrong row
+       if rows were deleted in between. */
+    send("/pmi-rename" + q({ row: row }), JSON.stringify(v),
+         { "Content-Type":"application/json" }, true)
+      .then(function(){
+        if (target && target.row === row) { setTarget(row, v.name || v.company); }
+        status("Row " + row + " is now <b>" + esc(v.name || v.company) + "</b>.", "ok");
+        refresh();
+      })
+      .catch(function(){
+        status("Could not rename, you need a connection. The capture is safe on " +
+               "row " + row + ".", "err");
+      });
+  });
+  if (wasUnassigned) { /* nothing extra, the prompt is already open */ }
+};
+
 $("pTarget").onclick = function(){
   if (openRow === null) { return; }
   setTarget(openRow, $("pName").textContent);
@@ -795,7 +868,7 @@ function refresh(){
 }
 
 /* ---------- go ---------- */
-openDB().then(function(){
+openDB().then(migrateQueue).then(function(){
   loadTarget();
   showPending();
   drain(false);
