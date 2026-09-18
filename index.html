@@ -30,6 +30,20 @@
   button.act .sub{font-size:11px;font-weight:400;color:var(--dim);text-align:center}
   button.wide{grid-column:1 / -1;min-height:64px;flex-direction:row;gap:10px}
   button.rec{background:#3b1d24;border-color:#7f2d3b}
+  /* The person every capture will be filed against. It is the first thing on
+     the screen because getting it wrong is silent: a debrief filed on the
+     wrong row reads perfectly, it is just about someone else. */
+  .target{border-radius:12px;padding:11px 13px;margin-bottom:12px;font-size:14px;
+    border:1px solid var(--line);background:var(--card);display:flex;
+    justify-content:space-between;align-items:center;gap:10px}
+  .target.none{border-color:#7f2d3b;background:#2a1a1f}
+  .target .lbl{font-size:10px;text-transform:uppercase;letter-spacing:.9px;
+    color:var(--dim);display:block;margin-bottom:2px}
+  .target .nm{font-weight:700}
+  .target button{background:none;border:1px solid var(--line);color:var(--dim);
+    border-radius:8px;padding:6px 10px;font-size:12px;white-space:nowrap}
+  .row.is-target{border-left:3px solid var(--accent);background:#222739}
+  .row .pick{font-size:11px;color:var(--accent);margin-top:6px}
   .status{border-radius:12px;padding:12px 14px;margin-bottom:12px;font-size:14px;
     border:1px solid var(--line);background:var(--card);display:none}
   .status.show{display:block}
@@ -90,6 +104,11 @@
   <span id="pendingTxt"></span><button id="retry">Retry now</button>
 </div>
 
+<div class="target none" id="target">
+  <div><span class="lbl">Capturing for</span><span class="nm" id="targetName">nobody yet</span></div>
+  <button id="targetClear">Change</button>
+</div>
+
 <div class="status" id="status"></div>
 
 <div class="grid">
@@ -134,7 +153,10 @@
   <div id="pBody"></div>
   <div class="drow">
     <button id="pDelete" class="danger">Delete</button>
-    <button class="go" id="pClose">Close</button>
+    <button class="go" id="pTarget">Capture for them</button>
+  </div>
+  <div class="drow">
+    <button id="pClose">Close</button>
   </div>
 </dialog>
 
@@ -343,12 +365,61 @@ function send(path, body, headers, noQueue){
     throw err;
   });
 }
-/* Pin the person this capture is for at the moment it is made. A recording
-   that waits in the offline queue used to be filed against whoever was last in
-   the sheet when it finally uploaded, so a queued debrief could overwrite a
-   later person's row. */
-function lastRow(){
-  return rows.length ? rows[rows.length - 1].row : 0;
+/* The person captures are filed against. Set explicitly: by scanning a badge,
+   by adding someone by name, or by tapping their row in the list. Never
+   inferred.
+
+   What this replaces: the app used to file every capture against
+   rows[rows.length-1], "the last row in the sheet". That is only correct when
+   you debrief immediately after scanning, and never correct otherwise. At the
+   summit Lincoln scanned J.C. Hagen, then Anna Woo, then Blythe Roberts, then
+   recorded the J.C. Hagen debrief: it landed on Blythe Roberts. The row had her
+   name and his conversation, and nothing on screen looked wrong.
+
+   It also degraded silently. refresh() swallowed its errors, so one dropped
+   request on booth wi-fi left the list empty, lastRow() returned 0, and the
+   server fell back to guessing which person an unlabelled recording belonged
+   to. That is the "record without scanning a badge and it picks someone at
+   random" behaviour. */
+var target = null;     /* { row: n, name: "..." } */
+
+function setTarget(row, name){
+  target = (row >= 2) ? { row: row, name: name || "row " + row } : null;
+  try {
+    if (target) { localStorage.setItem("pmiTarget", JSON.stringify(target)); }
+    else { localStorage.removeItem("pmiTarget"); }
+  } catch (e) {}
+  paintTarget();
+}
+function paintTarget(){
+  var el = $("target");
+  $("targetName").textContent = target ? target.name : "nobody yet";
+  el.className = target ? "target" : "target none";
+  $("targetClear").textContent = target ? "Change" : "Pick";
+  render();
+}
+/* Survives a reload, which matters: iOS discards the tab when the camera is
+   used and the page comes back fresh mid-conversation. */
+function loadTarget(){
+  try {
+    var t = JSON.parse(localStorage.getItem("pmiTarget") || "null");
+    if (t && t.row >= 2) { target = t; }
+  } catch (e) {}
+  paintTarget();
+}
+$("targetClear").onclick = function(){
+  setTarget(0, "");
+  status("Tap someone in the list below to capture for them.", "ok");
+};
+
+/* Refuse rather than guess. A capture with no person attached used to be filed
+   on a stranger; now it stops here and says so. */
+function needTarget(what){
+  if (target) { return true; }
+  status("Pick a person first: scan a badge, or tap someone in the list. " +
+         "Nothing is filed until you do, so " + what + " will not land on " +
+         "the wrong person.", "err");
+  return false;
 }
 function q(extra){
   var s = "?capturer=" + encodeURIComponent(who);
@@ -374,10 +445,15 @@ $("fileBadge").onchange = function(e){
     return send("/pmi-badge" + q(), JSON.stringify({ image:b64 }),
                 { "Content-Type":"application/json" });
   }).then(function(r){
+    /* The workflow now returns the row the append created. Pinning that is the
+       whole fix: it is the only number that is certainly this person's. */
+    if (r.row >= 2) { setTarget(r.row, r.name || r.company || "row " + r.row); }
     status("Got <b>" + esc(r.name || "badge") + "</b>" +
-           (r.company ? " · " + esc(r.company) : ""), "ok");
+           (r.company ? " · " + esc(r.company) : "") +
+           (r.row >= 2 ? "<br>Capturing for them now." :
+            "<br><b>No row came back.</b> Tap them in the list before recording."), "ok");
     return refresh().then(function(){
-      if (rows.length) { openPerson(rows[rows.length - 1].row); }
+      if (r.row >= 2) { openPerson(r.row); }
     });
   }).catch(failed);
 };
@@ -402,6 +478,7 @@ function shrink(file){
 
 /* ---------- audio ---------- */
 var rec = null, chunks = [], recTick = null, recMode = "debrief", recStart = 0;
+var recTarget = 0, recName = "";
 var wake = null;
 
 /* The Electia Love recording caught the first 4.4s of a three minute
@@ -426,6 +503,11 @@ document.addEventListener("visibilitychange", function(){
 
 function startRec(mode){
   recMode = mode;
+  /* Read the target when the recording STARTS. A long conversation can run for
+     twenty minutes and a queued one can sit on the phone for hours; in both
+     cases the person on screen by then may be someone else entirely. */
+  recTarget = target ? target.row : 0;
+  recName = target ? target.name : "";
   if (!navigator.mediaDevices || !window.MediaRecorder) {
     status("This browser cannot record audio. Use Type a note.", "err");
     return;
@@ -462,7 +544,8 @@ function startRec(mode){
     recStart = Date.now();
     holdWake();
 
-    $("recTitle").textContent = mode === "debrief" ? "Voice debrief" : "Recording conversation";
+    $("recTitle").textContent = (mode === "debrief" ? "Voice debrief" : "Recording")
+      + (recName ? " · " + recName : "");
     $("recHint").textContent = mode === "debrief"
       ? "Who, company, pillar, what they want, what you promised, hot or warm."
       : "Make sure they know they are being recorded.";
@@ -509,11 +592,13 @@ function endRec(keep){
     }
     busy("Transcribing&hellip;");
     toB64(blob).then(function(b64){
-      return send("/pmi-audio" + q({ mode:recMode, ext:ext, row:lastRow() }),
+      return send("/pmi-audio" + q({ mode:recMode, ext:ext, row:recTarget }),
                   JSON.stringify({ audio:b64, mime:type, ext:ext }),
                   { "Content-Type":"application/json" });
     }).then(function(r){
-        status("Saved to <b>" + (r.name || "your last person") + "</b>." +
+        status("Saved to <b>" + esc(recName || r.name || ("row " + r.row)) + "</b>." +
+          (r.unassigned ? " <b>No person was attached</b>, it is on its own row " +
+            "marked UNASSIGNED." : "") +
           (r.extracted ? "<br><span style='color:var(--dim);font-size:13px'>" +
             esc(r.extracted).slice(0,180) + "</span>" : ""), "ok");
         refresh();
@@ -521,8 +606,12 @@ function endRec(keep){
   };
   mr.stop();
 }
-$("bDebrief").onclick = function(){ startRec("debrief"); };
-$("bConvo").onclick   = function(){ startRec("conversation"); };
+$("bDebrief").onclick = function(){
+  if (needTarget("this debrief")) { startRec("debrief"); }
+};
+$("bConvo").onclick = function(){
+  if (needTarget("this recording")) { startRec("conversation"); }
+};
 $("recStop").onclick   = function(){ endRec(true); };
 $("recCancel").onclick = function(){ endRec(false); };
 
@@ -559,20 +648,23 @@ $("bPerson").onclick = function(){
     if (!v.name && !v.company) return;
     busy("Saving&hellip;");
     send("/pmi-person" + q(), JSON.stringify(v), { "Content-Type":"application/json" })
-      .then(function(){
-        status("Added <b>" + esc(v.name || v.company) + "</b>.", "ok");
+      .then(function(r){
+        if (r && r.row >= 2) { setTarget(r.row, v.name || v.company); }
+        status("Added <b>" + esc(v.name || v.company) + "</b>." +
+               (r && r.row >= 2 ? " Capturing for them now." : ""), "ok");
         refresh();
       }).catch(failed);
   });
 };
 
 $("bNote").onclick = function(){
-  askText("Note on your last person", [
+  if (!needTarget("this note")) { return; }
+  askText("Note on " + (target ? target.name : "this person"), [
     { key:"note", label:"What was said, what you promised, next step", multiline:true }
   ], function(v){
     if (!v.note) return;
     busy("Saving&hellip;");
-    send("/pmi-note" + q({ row:lastRow() }), JSON.stringify(v),
+    send("/pmi-note" + q({ row: target ? target.row : 0 }), JSON.stringify(v),
          { "Content-Type":"application/json" })
       .then(function(){ status("Note saved.", "ok"); refresh(); })
       .catch(failed);
@@ -594,12 +686,14 @@ function render(){
   }
   host.innerHTML = rows.slice().reverse().map(function(r){
     var extra = r.extracted || r.note || "";
-    return '<div class="row" data-row="' + r.row + '">' +
+    var isT = target && target.row === r.row;
+    return '<div class="row' + (isT ? ' is-target' : '') + '" data-row="' + r.row + '">' +
       '<div class="nm">' + esc(r.name || "Unnamed") + '</div>' +
       '<div class="co">' + esc([r.title, r.company].filter(Boolean).join(" · ")) + '</div>' +
       (extra ? '<div class="ex">' + esc(extra).slice(0, 200) + '</div>' : "") +
       '<div class="tm">' + esc(r.time || "") + '</div>' +
-      (r.card ? '<div class="more">Tap for talking points</div>' : "") +
+      '<div class="pick">' + (isT ? "Capturing for them" : "Tap to capture for them") +
+        (r.card ? " · talking points" : "") + '</div>' +
     '</div>';
   }).join("");
 }
@@ -657,6 +751,12 @@ $("list").addEventListener("click", function(e){
   if (el) { openPerson(parseInt(el.getAttribute("data-row"), 10)); }
 });
 $("pClose").onclick = function(){ $("dlgPerson").close(); };
+$("pTarget").onclick = function(){
+  if (openRow === null) { return; }
+  setTarget(openRow, $("pName").textContent);
+  $("dlgPerson").close();
+  status("Capturing for <b>" + esc($("pName").textContent) + "</b>.", "ok");
+};
 
 $("pDelete").onclick = function(){
   if (openRow === null) return;
@@ -673,15 +773,30 @@ $("pDelete").onclick = function(){
     .then(function(){ status("Deleted " + esc(name) + ".", "ok"); refresh(); })
     .catch(function(){ status("Could not delete, you need a connection.", "err"); });
 };
+/* This used to end in .catch(function(){}), which is what made the whole thing
+   fail silently: a dropped request left rows empty, the app sent row 0, and the
+   server guessed who the capture belonged to. Nothing surfaced. Now a failed
+   refresh says so and, crucially, leaves the pinned target alone: the target is
+   held independently of this list, so losing the list can no longer change who
+   a capture is filed against. */
 function refresh(){
   return fetch(API + "/pmi-list" + q(), { method:"GET" })
-    .then(function(r){ return r.json(); })
+    .then(function(r){
+      if (!r.ok) { throw new Error("HTTP " + r.status); }
+      return r.json();
+    })
     .then(function(d){ rows = (d && d.rows) || []; render(); })
-    .catch(function(){});
+    .catch(function(){
+      status("Could not load the list (no signal). Your captures still send, " +
+             "and they still go to " +
+             (target ? "<b>" + esc(target.name) + "</b>" : "nobody until you pick someone") +
+             ".", "err");
+    });
 }
 
 /* ---------- go ---------- */
 openDB().then(function(){
+  loadTarget();
   showPending();
   drain(false);
   refresh();
